@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 from torch.nn import init
 from resnet import resnet50
+import torch.nn.functional as F
 from losses import *
 
 def weights_init_kaiming(m):
@@ -97,10 +98,11 @@ class network(nn.Module):
 
         feat_p = self.pool(feat)
         cls_id = self.classifier(self.bottleneck(feat_p))
-
+        feat_p_norm = F.normalize(feat_p, p=2.0, dim=1)
         return {
             'cls_id': cls_id,
             'feat_p': feat_p,
-            'feat': feat
+            'feat': feat,
+            'feat_p_norm': feat_p_norm
         }
 
