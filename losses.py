@@ -13,7 +13,7 @@ class GeMP(nn.Module):
     if x.ndim != 2:
       batch_size, fdim = x.shape[:2]
       x = x.view(batch_size, fdim, -1)
-    return (torch.mean(x**p, dim=-1)+eps)**(1/p)
+    return (torch.mean(x**p, dim=-1) + eps)**(1/p)
 
 class OriTripletLoss(nn.Module):
   """Triplet loss with hard positive/negative mining.

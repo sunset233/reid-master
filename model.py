@@ -24,6 +24,62 @@ def weights_init_classifier(m):
         if m.bias:
             init.zeros_(m.bias.data)
 
+class Non_local(nn.Module):
+    def __init__(self, in_channels, reduc_ratio=2):
+        super(Non_local, self).__init__()
+
+        self.in_channels = in_channels
+        self.inter_channels = reduc_ratio//reduc_ratio
+
+        self.g = nn.Sequential(
+            nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1, stride=1,
+                    padding=0),
+        )
+
+        self.W = nn.Sequential(
+            nn.Conv2d(in_channels=self.inter_channels, out_channels=self.in_channels,
+                    kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(self.in_channels),
+        )
+        nn.init.constant_(self.W[1].weight, 0.0)
+        nn.init.constant_(self.W[1].bias, 0.0)
+
+
+
+        self.theta = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels,
+                             kernel_size=1, stride=1, padding=0)
+
+        self.phi = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels,
+                           kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        '''
+                :param x: (b, c, t, h, w)
+                :return:
+                '''
+
+        batch_size = x.size(0)
+        g_x = self.g(x).view(batch_size, self.inter_channels, -1)
+        g_x = g_x.permute(0, 2, 1)
+
+        theta_x = self.theta(x).view(batch_size, self.inter_channels, -1)
+        theta_x = theta_x.permute(0, 2, 1)
+        phi_x = self.phi(x).view(batch_size, self.inter_channels, -1)
+        f = torch.matmul(theta_x, phi_x)
+        N = f.size(-1)
+        # f_div_C = torch.nn.functional.softmax(f, dim=-1)
+        f_div_C = f / N
+
+        y = torch.matmul(f_div_C, g_x)
+        y = y.permute(0, 2, 1).contiguous()
+        y = y.view(batch_size, self.inter_channels, *x.size()[2:])
+        W_y = self.W(y)
+        z = W_y + x
+
+        return z
+
+class Cross_Att(nn.Module):
+    pass
 class visible_module(nn.Module):
     def __init__(self, arch='resnet50'):
         super(visible_module, self).__init__()
@@ -49,7 +105,7 @@ class thermal_module(nn.Module):
         self.relu = thermal.relu
         self.maxpool = thermal.maxpool
 
-    def forawrd(self, x):
+    def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -79,12 +135,15 @@ class network(nn.Module):
         self.visible = visible_module(arch=arch)
         self.base_resnet = base_resnet(arch=arch)
         pool_dim = 2048
-        self.bottleneck = nn.BatchNorm2d(pool_dim)
+        self.bottleneck = nn.BatchNorm1d(pool_dim)
         self.bottleneck.requires_grad_(False)
         self.classifier = nn.Linear(pool_dim, class_num, bias=False)
         self.bottleneck.apply(weights_init_kaiming)
         self.classifier.apply(weights_init_classifier)
         self.pool = GeMP()
+
+
+        self.feat_self = Non_local(2048)
     def forward(self, x_v, x_t, mode=0):
         if mode == 0:
             x_v = self.visible(x_v)
@@ -95,6 +154,7 @@ class network(nn.Module):
         elif mode == 2:
             x = self.thermal(x_t)
         feat = self.base_resnet(x)
+        # feat = self.feat_self(feat)
 
         feat_p = self.pool(feat)
         cls_id = self.classifier(self.bottleneck(feat_p))
@@ -102,7 +162,6 @@ class network(nn.Module):
         return {
             'cls_id': cls_id,
             'feat_p': feat_p,
-            'feat': feat,
             'feat_p_norm': feat_p_norm
         }
 

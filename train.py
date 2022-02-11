@@ -24,7 +24,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 parser = argparse.ArgumentParser(description='PyTorch Cross-Modality Training')
 ### dataloader config
-parser.add_argument('--dataset', default='sysu', help='dataset name: [regdb or sysu]')
+parser.add_argument('--dataset', default='regdb', help='dataset name: [regdb or sysu]')
 parser.add_argument('--workers', default=4, type=int, help='number of data loading workers (default: 4)')
 parser.add_argument('--img_h', default=288, type=int, help='img height')
 parser.add_argument('--img_w', default=144, type=int, help='img width')
@@ -32,7 +32,7 @@ parser.add_argument('--num_pos', default=4, type=int, help='num of pos per ident
 parser.add_argument('--batch_size', default=8, type=int, help='training batch size')
 parser.add_argument('--test-batch', default=64, type=int, help='testing batch size')
 ### directory config
-parser.add_argument('--save_path', default='log/', type=str, help='parent save directory')
+parser.add_argument('--save_path', default='log/regdb', type=str, help='parent save directory')
 parser.add_argument('--exp_name', default='exp', type=str, help='child save directory')
 ### model/training config
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate, 0.00035 for adam')
@@ -48,7 +48,7 @@ parser.add_argument('--mode', default='all', type=str, help='all or indoor')
 ### misc
 parser.add_argument('--seed', default=0, type=int, help='random seed')
 parser.add_argument('--nvidia_device', default=0, type=int, help='gpu device to use')
-parser.add_argument('--enable_tb', action='store_true', help='enable tensorboard logging')
+parser.add_argument('--enable_tb', default=True, action='store_true', help='enable tensorboard logging')
 
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.nvidia_device)
@@ -223,9 +223,9 @@ def train(epoch):
         data_time.update(time.time() - end)
 
         if args.method == 'full':
-            out = net(img_v, img_t, use_cmalign=True)
+            out = net(img_v, img_t)
         else:
-            out = net(img_v, img_t, use_cmalign=False)
+            out = net(img_v, img_t)
 
         loss_tri, batch_acc = criterion_tri(out['feat_p'], labels)
 
@@ -311,7 +311,7 @@ def test(epoch):
             input = data['img']
             batch_num = input.size(0)
             input = Variable(input.cuda())
-            feat = net(input, input, test_mode[0], use_cmalign=False)['feat_p_norm']
+            feat = net(input, input, test_mode[0])['feat_p_norm']
             gall_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))
@@ -327,7 +327,7 @@ def test(epoch):
             input = data['img']
             batch_num = input.size(0)
             input = Variable(input.cuda())
-            feat = net(input, input, test_mode[1], use_cmalign=False)['feat_p_norm']
+            feat = net(input, input, test_mode[1] )['feat_p_norm']
             query_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))
