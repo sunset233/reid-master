@@ -149,7 +149,7 @@ print('Data Loading Time:\t {:.3f}'.format(time.time() - end))
 
 print('==> Building model..')
 
-net = network(args, n_class)
+net = network(args, n_class, no_local='on')
 
 net.to(device)
 cudnn.benchmark = True
@@ -213,6 +213,11 @@ def train(epoch):
 
         img_v, img_t = data['img_v'], data['img_t']
         target_v, target_t = data['target_v'], data['target_t']
+        if img_v.size(0) < img_t.size(0):  # 若融合的数量不同
+            img_v1 = img_v[-1].unsqueeze(dim=0)
+            img_v = torch.cat((img_v, img_v1))
+            target_v1 = target_v[-1].unsqueeze(dim=0)
+            target_v = torch.cat((target_v, target_v1))
 
         labels = torch.cat((target_v, target_t), 0)
 

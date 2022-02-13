@@ -176,60 +176,76 @@ if dataset == 'sysu':
                 cmc_pool[0], cmc_pool[4], cmc_pool[9], cmc_pool[19], mAP_pool, mINP_pool))
 
 elif dataset == 'regdb':
-    print('==> Resuming from checkpoint..')
-
-    model_path = osp.join(args.save_path, args.exp_name)
-    model_path = osp.join(model_path, 'regdb/checkpoints/{}.t'.format(args.model_name))
-
-    if os.path.isfile(model_path):
-        print('==> loading checkpoint {} from {}'.format(args.model_name, args.exp_name))
-        checkpoint = torch.load(model_path)
-        net.load_state_dict(checkpoint['net'])
-        print('==> loaded checkpoint')
-    else:
-        print('==> checkpoint {} is not found'.format(args.model_name))
-
-    # testing set
-    query_img, query_label = process_test_regdb(data_path)
-    gall_img, gall_label = process_test_regdb(data_path, trial=1)
-
-    nquery = len(query_label)
-    ngall = len(gall_label)
-    print("Dataset statistics:")
-    print("  ------------------------------")
-    print("  subset   | # ids | # images")
-    print("  ------------------------------")
-    print("  query    | {:5d} | {:8d}".format(len(np.unique(query_label)), nquery))
-    print("  gallery  | {:5d} | {:8d}".format(len(np.unique(gall_label)), ngall))
-    print("  ------------------------------")
-
-    queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-    query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=4)
-    print('Data Loading Time:\t {:.3f}'.format(time.time() - end))
-
-    query_feat_pool = extract_query_feat(query_loader)
     for trial in range(10):
         test_trial = trial + 1
-        gall_img, gall_label = process_test_regdb(data_path, trial=test_trial)
+        # model_path = checkpoint_path +  args.resume
+        print('==> Resuming from checkpoint..')
 
-        trial_gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
-        trial_gall_loader = data.DataLoader(trial_gallset, batch_size=args.test_batch, shuffle=False, num_workers=4)
+        model_path = osp.join(args.save_path, args.exp_name)
+        model_path = osp.join(model_path, 'checkpoints/{}.t'.format(args.model_name))
+        if os.path.isfile(model_path):
+            print('==> loading checkpoint {}'.format(model_path))
+            checkpoint = torch.load(model_path)
+            net.load_state_dict(checkpoint['net'])
 
-        gall_feat_pool = extract_gall_feat(trial_gall_loader)
+        # training set
+        # trainset = RegDBData(data_path, test_trial, transform=transform_train)
+        # # generate the idx of each person identity
+        # color_pos, thermal_pos = GenIdx(trainset.train_color_label, trainset.train_thermal_label)
 
-        distmat_pool = np.matmul(query_feat_pool, np.transpose(gall_feat_pool))
-        cmc_pool, mAP_pool, mINP_pool = eval_regdb(-distmat_pool, query_label, gall_label)
+        # testing set
+        query_img, query_label = process_test_regdb(data_path, trial=test_trial, modal='visible')
+        gall_img, gall_label = process_test_regdb(data_path, trial=test_trial, modal='thermal')
+
+        gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
+        gall_loader = data.DataLoader(gallset, batch_size=args.test_batch, shuffle=False, num_workers=args.workers)
+
+        nquery = len(query_label)
+        ngall = len(gall_label)
+
+        queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
+        query_loader = data.DataLoader(queryset, batch_size=args.test_batch, shuffle=False, num_workers=4)
+        print('Data Loading Time:\t {:.3f}'.format(time.time() - end))
+
+        query_feat_pool = extract_query_feat(query_loader)
+        gall_feat_pool = extract_gall_feat(gall_loader)
+
+        if args.tvsearch:
+            # pool5 feature
+            distmat_pool = np.matmul(gall_feat_pool, np.transpose(query_feat_pool))
+            cmc_pool, mAP_pool, mINP_pool = eval_regdb(-distmat_pool, gall_label, query_label)
+
+            # fc feature
+            # distmat = np.matmul(gall_feat_fc, np.transpose(query_feat_fc))
+            # cmc, mAP, mINP = eval_regdb(-distmat, gall_label, query_label)
+        else:
+            # pool5 feature
+            distmat_pool = np.matmul(query_feat_pool, np.transpose(gall_feat_pool))
+            cmc_pool, mAP_pool, mINP_pool = eval_regdb(-distmat_pool, query_label, gall_label)
+
+            # fc feature
+            # distmat = np.matmul(query_feat_fc, np.transpose(gall_feat_fc))
+            # cmc, mAP, mINP = eval_regdb(-distmat, query_label, gall_label)
 
         if trial == 0:
+            # all_cmc = cmc
+            # all_mAP = mAP
+            # all_mINP = mINP
             all_cmc_pool = cmc_pool
             all_mAP_pool = mAP_pool
             all_mINP_pool = mINP_pool
         else:
+            # all_cmc = all_cmc + cmc
+            # all_mAP = all_mAP + mAP
+            # all_mINP = all_mINP + mINP
             all_cmc_pool = all_cmc_pool + cmc_pool
             all_mAP_pool = all_mAP_pool + mAP_pool
             all_mINP_pool = all_mINP_pool + mINP_pool
 
         print('Test Trial: {}'.format(trial))
+        # print(
+        #     'FC:     Rank-1: {:.2%} | Rank-5: {:.2%} | Rank-10: {:.2%}| Rank-20: {:.2%}| mAP: {:.2%}| mINP: {:.2%}'.format(
+        #         cmc[0], cmc[4], cmc[9], cmc[19], mAP, mINP))
         print(
             'POOL:   Rank-1: {:.2%} | Rank-5: {:.2%} | Rank-10: {:.2%}| Rank-20: {:.2%}| mAP: {:.2%}| mINP: {:.2%}'.format(
                 cmc_pool[0], cmc_pool[4], cmc_pool[9], cmc_pool[19], mAP_pool, mINP_pool))
