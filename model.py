@@ -1,3 +1,5 @@
+import random
+
 import torch.nn as nn
 import torch
 from torch.nn import init
@@ -24,6 +26,161 @@ def weights_init_classifier(m):
         if m.bias:
             init.zeros_(m.bias.data)
 
+
+class CMAlign(nn.Module):
+    def __init__(self, batch_size=8, num_pos=4, temperature=50):
+        super(CMAlign, self).__init__()
+        self.batch_size = batch_size
+        self.num_pos = num_pos
+        self.criterion = nn.TripletMarginLoss(margin=0.3, p=2.0, reduce=False)
+        self.temperature = temperature
+
+    def _random_pairs(self):
+        batch_size = self.batch_size
+        num_pos = self.num_pos
+
+        pos = []
+        for batch_index in range(batch_size):
+            pos_idx = random.sample(list(range(num_pos)), num_pos)
+            pos_idx = np.array(pos_idx) + num_pos * batch_index
+            pos = np.concatenate((pos, pos_idx))
+        pos = pos.astype(int)
+
+        neg = []
+        for batch_index in range(batch_size):
+            batch_list = list(range(batch_size))
+            batch_list.remove(batch_index)
+
+            batch_idx = random.sample(batch_list, num_pos)
+            neg_idx = random.sample(list(range(num_pos)), num_pos)
+
+            batch_idx, neg_idx = np.array(batch_idx), np.array(neg_idx)
+            neg_idx = batch_idx * num_pos + neg_idx
+            neg = np.concatenate((neg, neg_idx))
+        neg = neg.astype(int)
+
+        return {'pos': pos, 'neg': neg}
+
+    def _define_pairs(self):
+        pairs_v = self._random_pairs()
+        pos_v, neg_v = pairs_v['pos'], pairs_v['neg']
+
+        pairs_t = self._random_pairs()
+        pos_t, neg_t = pairs_t['pos'], pairs_t['neg']
+
+        pos_v += self.batch_size * self.num_pos
+        neg_v += self.batch_size * self.num_pos
+
+        return {'pos': np.concatenate((pos_v, pos_t)), 'neg': np.concatenate((neg_v, neg_t))}
+
+    def feature_similarity(self, feat_q, feat_k):
+        batch_size, fdim, h, w = feat_q.shape
+        feat_q = feat_q.view(batch_size, fdim, -1)
+        feat_k = feat_k.view(batch_size, fdim, -1)
+
+        feature_sim = torch.bmm(F.normalize(feat_q, dim=1).permute(0, 2, 1), F.normalize(feat_k, dim=1))
+        return feature_sim
+
+    def matching_probability(self, feature_sim):
+        M, _ = feature_sim.max(dim=-1, keepdim=True)
+        feature_sim = feature_sim - M  # for numerical stability
+        exp = torch.exp(self.temperature * feature_sim)
+        exp_sum = exp.sum(dim=-1, keepdim=True)
+        return exp / exp_sum
+
+    def soft_warping(self, matching_pr, feat_k):
+        batch_size, fdim, h, w = feat_k.shape
+        feat_k = feat_k.view(batch_size, fdim, -1)
+        feat_warp = torch.bmm(matching_pr, feat_k.permute(0, 2, 1))
+        feat_warp = feat_warp.permute(0, 2, 1).view(batch_size, fdim, h, w)
+
+        return feat_warp
+
+    def reconstruct(self, mask, feat_warp, feat_q):
+        return mask * feat_warp + (1.0 - mask) * feat_q
+
+    def compute_mask(self, feat):
+        batch_size, fdim, h, w = feat.shape
+        norms = torch.norm(feat, p=2, dim=1).view(batch_size, h * w)
+
+        norms -= norms.min(dim=-1, keepdim=True)[0]
+        norms /= norms.max(dim=-1, keepdim=True)[0] + 1e-12
+        mask = norms.view(batch_size, 1, h, w)
+
+        return mask.detach()
+
+    def compute_comask(self, matching_pr, mask_q, mask_k):
+        batch_size, mdim, h, w = mask_q.shape
+        mask_q = mask_q.view(batch_size, -1, 1)
+        mask_k = mask_k.view(batch_size, -1, 1)
+        comask = mask_q * torch.bmm(matching_pr, mask_k)
+
+        comask = comask.view(batch_size, -1)
+        comask -= comask.min(dim=-1, keepdim=True)[0]
+        comask /= comask.max(dim=-1, keepdim=True)[0] + 1e-12
+        comask = comask.view(batch_size, mdim, h, w)
+
+        return comask.detach()
+
+    def forward(self, feat_s, feat_c):
+        mask = self.compute_mask(feat_s)
+        batch_size, fdim, h, w = feat_s.shape
+
+        pairs = self._define_pairs()
+        pos_idx, neg_idx = pairs['pos'], pairs['neg']
+
+        # feat_target_pos = feat_s[pos_idx]
+        feat_sim = self.feature_similarity(feat_s, feat_c)
+        matching_pr = self.matching_probability(feat_sim)
+        feat_wrap = self.soft_warping(matching_pr, feat_s)
+        feat_recon = self.reconstruct(mask, feat_wrap, feat_s)
+
+        feat_wrap_c = self.soft_warping(matching_pr, feat_c)
+        feat_recon_c = self.reconstruct(mask, feat_wrap_c, feat_c)
+        # comask = self.compute_comask(matching_pr, mask, mask[pos_idx])
+        loss = torch.mean(self.criterion(feat_s, feat_recon, feat_recon_c))
+
+
+        # comask_pos = self.compute_comask(matching_pr, mask, mask[pos_idx])
+        # feat_wrap_pos = self.soft_warping(matching_pr, feat_c)
+        # feat_recon_pos = self.reconstruct(mask, feat_wrap_pos, feat_s)
+        #
+        # feat_target_neg = feat_s[neg_idx]
+        # feat_sim = self.feature_similarity(feat_s, feat_target_neg)
+        # matching_pr = self.matching_probability(feat_sim)
+        #
+        # feat_wrap = self.soft_warping(matching_pr, feat_target_neg)
+        # feat_recon_neg = self.reconstruct(mask, feat_wrap, feat_s)
+        # loss = torch.mean(comask_pos * self.criterion(feat_s, feat_recon_pos, feat_recon_neg))
+
+
+        # feat = torch.cat([feat_v, feat_t], dim=0)
+        # mask = self.compute_mask(feat)
+        # batch_size, fdim, h, w = feat.shape
+        #
+        # pairs = self._define_pairs()
+        # pos_idx, neg_idx = pairs['pos'], pairs['neg']
+        #
+        # # positive
+        # feat_target_pos = feat[pos_idx]
+        # feature_sim = self.feature_similarity(feat, feat_target_pos)
+        # matching_pr = self.matching_probability(feature_sim)
+        #
+        # comask_pos = self.compute_comask(matching_pr, mask, mask[pos_idx])
+        # feat_warp_pos = self.soft_warping(matching_pr, feat_target_pos)
+        # feat_recon_pos = self.reconstruct(mask, feat_warp_pos, feat)
+        #
+        # # negative
+        # feat_target_neg = feat[neg_idx]
+        # feature_sim = self.feature_similarity(feat, feat_target_neg)
+        # matching_pr = self.matching_probability(feature_sim)
+        #
+        # feat_warp = self.soft_warping(matching_pr, feat_target_neg)
+        # feat_recon_neg = self.reconstruct(mask, feat_warp, feat)
+        #
+        # loss = torch.mean(comask_pos * self.criterion(feat, feat_recon_pos, feat_recon_neg))
+
+        return {'feat': feat_recon, 'loss': loss}
 class Non_local(nn.Module):
     def __init__(self, in_channels, reduc_ratio=2):
         super(Non_local, self).__init__()
@@ -110,14 +267,15 @@ class cross_attention(nn.Module):
         xv_norm = x_norm[:b]
         xt_norm = x_norm[b:]
         a = torch.matmul(xv_norm.transpose(1,2), xt_norm)
-        a = torch.cat((a, a.transpose(1, 2)))
+        a = torch.cat((a, a.transpose(1, 2))) # [32, 162, 162]
         a = self.get_attention(a)
         feat = x * a.unsqueeze(1)
         feat_v = feat[:b]
         feat_t = feat[b:]
         feat_v = feat_v.view(b, c, h, w)
         feat_t = feat_t.view(b, c, h, w)
-        return feat_v, feat_t
+        return feat_v, feat_t  # [32, 2048, 18, 9]
+
 class visible_module(nn.Module):
     def __init__(self, arch='resnet50'):
         super(visible_module, self).__init__()
@@ -133,6 +291,41 @@ class visible_module(nn.Module):
         x = self.relu(x)
         x = self.maxpool(x)
         return x
+
+class feature_fusion(nn.Module):
+    def __init__(self, channels=2048, r=4):
+        super(feature_fusion, self).__init__()
+        inter_channels = int(channels // r)
+
+        self.local_att = nn.Sequential(
+            nn.Conv2d(channels, inter_channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(channels),
+        )
+
+        self.global_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, inter_channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(inter_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_channels, channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(channels),
+        )
+
+        self.sigmoid = nn.Sigmoid()
+
+
+    def forward(self, x, residual):
+        xa = x + residual
+        xl = self.local_att(xa)
+        xg = self.global_att(xa)
+        xlg = xl + xg
+        wei = self.sigmoid(xlg)
+
+        xo = 2 * x * wei + 2 * residual * (1 - wei)
+        return xo
 
 class thermal_module(nn.Module):
     def __init__(self, arch='resnet50'):
@@ -185,6 +378,7 @@ class network(nn.Module):
             self.NL_3 = nn.ModuleList([Non_local(1024) for i in range(3)])
             self.NL_3_idx = sorted(6-(i+1) for i in range(3))
         self.feat_cross = cross_attention()
+        self.fusion = CMAlign()
     def forward(self, x_v, x_t, mode=0):
         if mode == 0:
             x_v = self.visible(x_v)
@@ -194,8 +388,9 @@ class network(nn.Module):
             x = self.visible(x_v)
         elif mode == 2:
             x = self.thermal(x_t)
+        x_origin = x
         if self.non_local == 'on':
-            x = self.base_resnet.layer1(x)
+            x = self.base_resnet.layer1(x_origin)
             x = self.base_resnet.layer2(x)
             NL3_counter = 0
             if len(self.NL_3_idx) == 0:  self.NL_3_idx = [-1]
@@ -205,20 +400,27 @@ class network(nn.Module):
                     _, C, H, W = x.shape
                     x = self.NL_3[NL3_counter](x)
                     NL3_counter += 1
-            x = self.base_resnet.layer4(x)
-        else:
-            x = self.base_resnet(x)
+            x_self = self.base_resnet.layer4(x)
+        x = self.base_resnet(x_origin)
         batch_size, fdim, h, w = x.shape
         xv = x[:batch_size//2]
         xt = x[batch_size//2:]
         xv_c, xt_c = self.feat_cross(xv, xt)
+        xv_s, xt_s = x_self[:batch_size//2], x_self[batch_size//2:]
+        res_v = self.fusion(xv_s, xt_c)
+        res_t = self.fusion(xt_s, xv_c)
+        x_recon = torch.cat((res_v['feat'], res_t['feat']), dim=0)
 
-        feat_p = self.pool(x)
+
+
+        feat_p = self.pool(x_recon)
         cls_id = self.classifier(self.bottleneck(feat_p))
         feat_p_norm = F.normalize(feat_p, p=2.0, dim=1)
+        loss_recon = (res_v['loss'] + res_t['loss'])/2
         return {
             'cls_id': cls_id,
             'feat_p': feat_p,
-            'feat_p_norm': feat_p_norm
+            'feat_p_norm': feat_p_norm,
+            'loss_recon': loss_recon
         }
 

@@ -195,6 +195,7 @@ def train(epoch):
     current_lr = adjust_learning_rate(optimizer, epoch)
     train_loss_meter = AverageMeter()
     loss_id_meter = AverageMeter()
+    loss_recon_meter = AverageMeter()
     # if args.method == 'full':
     #     loss_ic_meter = AverageMeter()
     #     loss_dt_meter = AverageMeter()
@@ -235,7 +236,8 @@ def train(epoch):
         loss_tri, batch_acc = criterion_tri(out['feat_p'], labels)
 
         loss_id = criterion_id(out['cls_id'], labels) + loss_tri
-        loss = loss_id
+        loss_recon = out['loss_recon']
+        loss = loss_id + loss_recon
         # if args.method == 'full':
         #     loss_ic = criterion_id(out['cls_ic_layer3'], labels) + criterion_id(out['cls_ic_layer4'], labels)
         #     loss_dt = out['loss_dt']
@@ -255,6 +257,8 @@ def train(epoch):
 
         train_loss_meter.update(loss.item(), 2 * img_v.size(0))
         loss_id_meter.update(loss_id.item(), 2 * img_v.size(0))
+        loss_recon_meter.update(loss_recon.item(), 2 * img_v.size(0))
+
         # if args.method == 'full':
         #     loss_ic_meter.update(loss_ic.item(), 2 * img_v.size(0))
         #     loss_dt_meter.update(loss_dt.item(), 2 * img_v.size(0))
@@ -273,11 +277,13 @@ def train(epoch):
                       'lr: {:.3f} '
                       'loss: {train_loss.val:.4f} ({train_loss.avg:.4f}) '
                       'loss_id: {loss_id.val:.4f} ({loss_id.avg:.4f}) '
+                      'loss_recon: {loss_recon.val:.4f} ({loss_recon.avg:.4f})'
                       'acc: {acc:.2f}'.format(
                     epoch, batch_idx, len(trainloader),
                     current_lr,
                     train_loss=train_loss_meter,
                     loss_id=loss_id_meter,
+                    loss_recon=loss_recon_meter,
                     # loss_ic=loss_ic_meter,
                     # loss_dt=loss_dt_meter,
                     acc=100. * correct / total)
