@@ -245,54 +245,41 @@ class cross_attention(nn.Module):
         self.conv3 = nn.Conv2d(self.in_c2, self.in_c2 // 2, kernel_size=1)
         self.conv4 = nn.Conv2d(self.in_c2 // 2, self.in_c2, kernel_size=1)
 
-    def get_attention(self, a):
-        input_a = a
-        a = a.unsqueeze(0)
-        if a.size(1)==64:
-            a = F.relu(self.conv1(a))
-            a = self.conv2(a)
-        elif a.size(1)==12:
-            a = F.relu(self.conv3(a))
-            a = self.conv4(a)
-        a = a.squeeze(0)
-        a = torch.mean(input_a*a, -1)
-        a = F.softmax(a/0.05, dim=-1) + 1
-        return a
+    # def get_attention(self, a): # [32, 162, 162]
+    #     input_a = a
+    #     a = a.unsqueeze(0)
+    #     if a.size(1)==64:
+    #         a = F.relu(self.conv1(a))
+    #         a = self.conv2(a)
+    #     elif a.size(1)==12:
+    #         a = F.relu(self.conv3(a))
+    #         a = self.conv4(a)
+    #     a = a.squeeze(0)
+    #     a = torch.mean(input_a*a, -1)
+    #     a = F.softmax(a/0.05, dim=-1) + 1
+    #     return a
 
     def forward(self, xv, xt): # xv: [32, 2048, 18, 9]  xt: [32, 2048, 18, 9]
         b, c, h, w = xv.size()
-        x = torch.cat((xv, xt))
-        x = x.view(2*b, c, -1)
-        x_norm = F.normalize(x, p=2, dim=1, eps=1e-12)
-        xv_norm = x_norm[:b]
-        xt_norm = x_norm[b:]
-        a = torch.matmul(xv_norm.transpose(1,2), xt_norm)
-        a = torch.cat((a, a.transpose(1, 2))) # [32, 162, 162]
-        a = self.get_attention(a)
-        feat = x * a.unsqueeze(1)
-        feat_v = feat[:b]
-        feat_t = feat[b:]
+        xv = xv.view(b, c, -1)
+        xt = xt.view(b, c, -1)
+        feat_sim = torch.bmm(normalize(xv).permute(0, 2, 1), normalize(xt))
+        M, _ = feat_sim.max(dim=-1, keepdim=True)
+        feat_sim = feat_sim - M
+        exp = torch.exp(feat_sim * 50)
+        exp_sum = exp.sum(dim=-1, keepdim = True)
+        relation = exp / exp_sum
+        relation = F.softmax(torch.mean(relation, -1), dim=-1) + 1
+        feat_v = xv * relation.unsqueeze(1) # [32, 2048, 162] @ [32, 162, 162]
+        feat_t = xt * relation.unsqueeze(1)
         feat_v = feat_v.view(b, c, h, w)
         feat_t = feat_t.view(b, c, h, w)
-        return feat_v, feat_t  # [32, 2048, 18, 9]
-
-class visible_module(nn.Module):
-    def __init__(self, arch='resnet50'):
-        super(visible_module, self).__init__()
-        visible = resnet50(pretrained=True, last_conv_stride=1, last_conv_dilation=1)
-        self.conv1 = visible.conv1
-        self.bn1 = visible.bn1
-        self.relu = visible.relu
-        self.maxpool = visible.maxpool
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        return x
+        return feat_v, feat_t
 
 class feature_fusion(nn.Module):
+    '''
+        This section we use SMGM method to merge the features.
+    '''
     def __init__(self, channels=2048, r=4):
         super(feature_fusion, self).__init__()
         inter_channels = int(channels // r)
@@ -315,17 +302,34 @@ class feature_fusion(nn.Module):
         )
 
         self.sigmoid = nn.Sigmoid()
+    def forward(self, feat_self, feat_cross, mode = 0):
+        '''
 
+        :param feat_self:
+        :param feat_cross:
+        :return:
+        '''
+        if mode == 0: # make visible images
+            pass
+        else: # make thermal images
+            pass
+        pass
 
-    def forward(self, x, residual):
-        xa = x + residual
-        xl = self.local_att(xa)
-        xg = self.global_att(xa)
-        xlg = xl + xg
-        wei = self.sigmoid(xlg)
+class visible_module(nn.Module):
+    def __init__(self, arch='resnet50'):
+        super(visible_module, self).__init__()
+        visible = resnet50(pretrained=True, last_conv_stride=1, last_conv_dilation=1)
+        self.conv1 = visible.conv1
+        self.bn1 = visible.bn1
+        self.relu = visible.relu
+        self.maxpool = visible.maxpool
 
-        xo = 2 * x * wei + 2 * residual * (1 - wei)
-        return xo
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        return x
 
 class thermal_module(nn.Module):
     def __init__(self, arch='resnet50'):
@@ -375,6 +379,8 @@ class network(nn.Module):
 
         self.non_local = no_local
         if self.non_local == 'on':
+            self.NL_2 = nn.ModuleList([Non_local(512) for i in range(2)])
+            self.NL_2_idx = sorted(4-(i+1) for i in range(2))
             self.NL_3 = nn.ModuleList([Non_local(1024) for i in range(3)])
             self.NL_3_idx = sorted(6-(i+1) for i in range(3))
         self.feat_cross = cross_attention()
@@ -392,6 +398,14 @@ class network(nn.Module):
         if self.non_local == 'on':
             x = self.base_resnet.layer1(x_origin)
             x = self.base_resnet.layer2(x)
+            # NL2_counter = 0
+            # if len(self.NL_2_idx) == 0:  self.NL_2_idx = [-1]
+            # for i in range(len(self.base_resnet.layer2)):
+            #     x = self.base_resnet.layer2[i](x)
+            #     if i == self.NL_2_idx[NL2_counter]:
+            #         _, C, H, W = x.shape
+            #         x = self.NL_2[NL2_counter](x)
+            #         NL2_counter += 1
             NL3_counter = 0
             if len(self.NL_3_idx) == 0:  self.NL_3_idx = [-1]
             for i in range(len(self.base_resnet.layer3)):
@@ -416,11 +430,11 @@ class network(nn.Module):
         feat_p = self.pool(x_recon)
         cls_id = self.classifier(self.bottleneck(feat_p))
         feat_p_norm = F.normalize(feat_p, p=2.0, dim=1)
-        loss_recon = (res_v['loss'] + res_t['loss'])/2
+        # loss_recon = (res_v['loss'] + res_t['loss'])/2
         return {
             'cls_id': cls_id,
             'feat_p': feat_p,
             'feat_p_norm': feat_p_norm,
-            'loss_recon': loss_recon
+            # 'loss_recon': loss_recon
         }
 
