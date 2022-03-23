@@ -1,137 +1,172 @@
-# coding:utf-8
+# import torch.nn as nn
+# import torch
+# import torch.nn.functional as F
+#
+#
+# class fusion(nn.Module):
+#     def __init__(self):
+#         super(fusion, self).__init__()
+#
+#     def compute_mask(self, feat): # 计算掩码矩阵
+#         batch_size, fdim, h, w = feat.shape
+#         norms = torch.norm(feat, p=2, dim=1).view(batch_size, h * w)
+#
+#         norms -= norms.min(dim=-1, keepdim=True)[0]
+#         norms /= norms.max(dim=-1, keepdim=True)[0] + 1e-12
+#         mask = norms.view(batch_size, 1, h, w)
+#
+#         return mask.detach()
+#     def compute_loss(self, x_self, x_recon):
+#         return torch.mean(torch.abs(x_self - x_recon))
+#
+#     def forward(self, x_self, x, x_cross): # 前向传播
+#         mask = self.compute_mask(x_self) # 计算掩码矩阵
+#         match_pr = x_cross / x # 计算匹配可能性
+#         feat_wrap = x_cross * match_pr # 自注意力和匹配性的结合
+#         feat_recon = feat_wrap * mask + x_cross * (1 - mask) # 重构特征
+#         loss_recon = self.compute_loss(x_self, feat_recon)
+#         return {
+#             'feat': feat_recon,
+#             'loss': loss_recon
+#         }
+# def unit_test():
+#     import numpy as np
+#     x = torch.tensor(np.random.rand(32, 2048, 18, 9).astype(np.float32))
+#     model = fusion(output=2048)
+#     y = model(x, x)
+#     print('output shape:', y.shape)
+#     assert y.shape == (32, 2048, 18, 9), 'output shape (2,1,480,640) is expected!'
+#     print('test ok!')
+#
+# if __name__ == '__main__':
+#     unit_test()
+import random
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+from torch.nn import init
 
-class ConvBnLeakyRelu2d(nn.Module):
-    # convolution
-    # batch normalization
-    # leaky relu
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1, dilation=1, groups=1):
-        super(ConvBnLeakyRelu2d, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride, dilation=dilation, groups=groups)
-        self.bn   = nn.BatchNorm2d(out_channels)
-    def forward(self, x):
-        return F.leaky_relu(self.conv(x), negative_slope=0.2)
+class CMAlign(nn.Module):
+    def __init__(self, batch_size=8, num_pos=4, temperature=50):
+        super(CMAlign, self).__init__()
+        self.batch_size = batch_size
+        self.num_pos = num_pos
+        self.criterion = nn.TripletMarginLoss(margin=0.3, p=2.0, reduce=False)
+        self.temperature = temperature
 
-class ConvBnTanh2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1, dilation=1, groups=1):
-        super(ConvBnTanh2d, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride, dilation=dilation, groups=groups)
-        self.bn   = nn.BatchNorm2d(out_channels)
-    def forward(self,x):
-        return torch.tanh(self.conv(x))/2+0.5
+    def _random_pairs(self):
+        batch_size = self.batch_size
+        num_pos = self.num_pos
 
-class ConvLeakyRelu2d(nn.Module):
-    # convolution
-    # leaky relu
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1, dilation=1, groups=1):
-        super(ConvLeakyRelu2d, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride, dilation=dilation, groups=groups)
-        # self.bn   = nn.BatchNorm2d(out_channels)
-    def forward(self,x):
-        # print(x.size())
-        return F.leaky_relu(self.conv(x), negative_slope=0.2)
+        pos = []
+        for batch_index in range(batch_size):
+            pos_idx = random.sample(list(range(num_pos)), num_pos)
+            pos_idx = np.array(pos_idx) + num_pos * batch_index
+            pos = np.concatenate((pos, pos_idx))
+        pos = pos.astype(int)
 
-class Sobelxy(nn.Module):
-    def __init__(self,channels, kernel_size=3, padding=1, stride=1, dilation=1, groups=1):
-        super(Sobelxy, self).__init__()
-        sobel_filter = np.array([[1, 0, -1],
-                                 [2, 0, -2],
-                                 [1, 0, -1]])
-        self.convx=nn.Conv2d(channels, channels, kernel_size=kernel_size, padding=padding, stride=stride, dilation=dilation, groups=channels,bias=False)
-        self.convx.weight.data.copy_(torch.from_numpy(sobel_filter))
-        self.convy=nn.Conv2d(channels, channels, kernel_size=kernel_size, padding=padding, stride=stride, dilation=dilation, groups=channels,bias=False)
-        self.convy.weight.data.copy_(torch.from_numpy(sobel_filter.T))
-    def forward(self, x):
-        sobelx = self.convx(x)
-        sobely = self.convy(x)
-        x=torch.abs(sobelx) + torch.abs(sobely)
-        return x
+        neg = []
+        for batch_index in range(batch_size):
+            batch_list = list(range(batch_size))
+            batch_list.remove(batch_index)
 
-class Conv1(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, padding=0, stride=1, dilation=1, groups=1):
-        super(Conv1, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride, dilation=dilation, groups=groups)
-    def forward(self,x):
-        return self.conv(x)
+            batch_idx = random.sample(batch_list, num_pos)
+            neg_idx = random.sample(list(range(num_pos)), num_pos)
 
-class DenseBlock(nn.Module):
-    def __init__(self,channels):
-        super(DenseBlock, self).__init__()
-        self.conv1 = ConvLeakyRelu2d(channels, channels)
-        self.conv2 = ConvLeakyRelu2d(2*channels, channels)
-        # self.conv3 = ConvLeakyRelu2d(3*channels, channels)
-    def forward(self,x):
-        x=torch.cat((x,self.conv1(x)),dim=1)
-        x = torch.cat((x, self.conv2(x)), dim=1)
-        # x = torch.cat((x, self.conv3(x)), dim=1)
-        return x
+            batch_idx, neg_idx = np.array(batch_idx), np.array(neg_idx)
+            neg_idx = batch_idx * num_pos + neg_idx
+            neg = np.concatenate((neg, neg_idx))
+        neg = neg.astype(int)
 
-class RGBD(nn.Module):
-    def __init__(self,in_channels,out_channels):
-        super(RGBD, self).__init__()
-        self.dense =DenseBlock(in_channels)
-        self.convdown=Conv1(3*in_channels,out_channels)
-        self.sobelconv=Sobelxy(in_channels)
-        self.convup =Conv1(in_channels,out_channels)
-    def forward(self,x):
-        x1=self.dense(x)
-        x1=self.convdown(x1)
-        x2=self.sobelconv(x)
-        x2=self.convup(x2)
-        return F.leaky_relu(x1+x2,negative_slope=0.1)
+        return {'pos': pos, 'neg': neg}
 
-class FusionNet(nn.Module):
-    def __init__(self, output):
-        super(FusionNet, self).__init__()
-        vis_ch = [16,32,48]
-        inf_ch = [16,32,48]
-        output=1
-        self.vis_conv=ConvLeakyRelu2d(1,vis_ch[0])
-        self.vis_rgbd1=RGBD(vis_ch[0], vis_ch[1])
-        self.vis_rgbd2 = RGBD(vis_ch[1], vis_ch[2])
-        # self.vis_rgbd3 = RGBD(vis_ch[2], vis_ch[3])
-        self.inf_conv=ConvLeakyRelu2d(1, inf_ch[0])
-        self.inf_rgbd1 = RGBD(inf_ch[0], inf_ch[1])
-        self.inf_rgbd2 = RGBD(inf_ch[1], inf_ch[2])
-        # self.inf_rgbd3 = RGBD(inf_ch[2], inf_ch[3])
-        # self.decode5 = ConvBnLeakyRelu2d(vis_ch[3]+inf_ch[3], vis_ch[2]+inf_ch[2])
-        self.decode4 = ConvBnLeakyRelu2d(vis_ch[2]+inf_ch[2], vis_ch[1]+vis_ch[1])
-        self.decode3 = ConvBnLeakyRelu2d(vis_ch[1]+inf_ch[1], vis_ch[0]+inf_ch[0])
-        self.decode2 = ConvBnLeakyRelu2d(vis_ch[0]+inf_ch[0], vis_ch[0])
-        self.decode1 = ConvBnTanh2d(vis_ch[0], output)
-    def forward(self, image_vis,image_ir):
-        # split data into RGB and INF
-        x_vis_origin = image_vis[:,:1]
-        x_inf_origin = image_ir
-        # encode
-        x_vis_p=self.vis_conv(x_vis_origin)
-        x_vis_p1=self.vis_rgbd1(x_vis_p)
-        x_vis_p2=self.vis_rgbd2(x_vis_p1)
-        # x_vis_p3=self.vis_rgbd3(x_vis_p2)
+    def _define_pairs(self):
+        pairs_v = self._random_pairs()
+        pos_v, neg_v = pairs_v['pos'], pairs_v['neg']
 
-        x_inf_p=self.inf_conv(x_inf_origin)
-        x_inf_p1=self.inf_rgbd1(x_inf_p)
-        x_inf_p2=self.inf_rgbd2(x_inf_p1)
-        # x_inf_p3=self.inf_rgbd3(x_inf_p2)
-        # decode
-        x=self.decode4(torch.cat((x_vis_p2,x_inf_p2),dim=1))
-        # x=self.decode4(x)
-        x=self.decode3(x)
-        x=self.decode2(x)
-        x=self.decode1(x)
-        return x
+        pairs_t = self._random_pairs()
+        pos_t, neg_t = pairs_t['pos'], pairs_t['neg']
 
-def unit_test():
-    import numpy as np
-    x = torch.tensor(np.random.rand(2,4,480,640).astype(np.float32))
-    model = FusionNet(output=1)
-    y = model(x)
-    print('output shape:', y.shape)
-    assert y.shape == (2,1,480,640), 'output shape (2,1,480,640) is expected!'
-    print('test ok!')
+        pos_v += self.batch_size * self.num_pos
+        neg_v += self.batch_size * self.num_pos
 
-if __name__ == '__main__':
-    unit_test()
+        return {'pos': np.concatenate((pos_v, pos_t)), 'neg': np.concatenate((neg_v, neg_t))}
+
+    def feature_similarity(self, feat_q, feat_k):
+        batch_size, fdim, h, w = feat_q.shape
+        feat_q = feat_q.view(batch_size, fdim, -1)
+        feat_k = feat_k.view(batch_size, fdim, -1)
+
+        feature_sim = torch.bmm(F.normalize(feat_q, dim=1).permute(0, 2, 1), F.normalize(feat_k, dim=1))
+        return feature_sim
+
+    def matching_probability(self, feature_sim):
+        M, _ = feature_sim.max(dim=-1, keepdim=True)
+        feature_sim = feature_sim - M  # for numerical stability
+        exp = torch.exp(self.temperature * feature_sim)
+        exp_sum = exp.sum(dim=-1, keepdim=True)
+        return exp / exp_sum
+
+    def soft_warping(self, matching_pr, feat_k):
+        batch_size, fdim, h, w = feat_k.shape
+        feat_k = feat_k.view(batch_size, fdim, -1)
+        feat_warp = torch.bmm(matching_pr, feat_k.permute(0, 2, 1))
+        feat_warp = feat_warp.permute(0, 2, 1).view(batch_size, fdim, h, w)
+
+        return feat_warp
+
+    def reconstruct(self, mask, feat_warp, feat_q):
+        return mask * feat_warp + (1.0 - mask) * feat_q
+
+    def compute_mask(self, feat):
+        batch_size, fdim, h, w = feat.shape
+        norms = torch.norm(feat, p=2, dim=1).view(batch_size, h * w)
+
+        norms -= norms.min(dim=-1, keepdim=True)[0]
+        norms /= norms.max(dim=-1, keepdim=True)[0] + 1e-12
+        mask = norms.view(batch_size, 1, h, w)
+
+        return mask.detach()
+
+    def compute_comask(self, matching_pr, mask_q, mask_k):
+        batch_size, mdim, h, w = mask_q.shape
+        mask_q = mask_q.view(batch_size, -1, 1)
+        mask_k = mask_k.view(batch_size, -1, 1)
+        comask = mask_q * torch.bmm(matching_pr, mask_k)
+
+        comask = comask.view(batch_size, -1)
+        comask -= comask.min(dim=-1, keepdim=True)[0]
+        comask /= comask.max(dim=-1, keepdim=True)[0] + 1e-12
+        comask = comask.view(batch_size, mdim, h, w)
+
+        return comask.detach()
+
+    def forward(self, feat_v, feat_t):
+        feat = torch.cat([feat_v, feat_t], dim=0)
+        mask = self.compute_mask(feat)
+
+        pairs = self._define_pairs()
+        pos_idx, neg_idx = pairs['pos'], pairs['neg']
+
+        # positive
+        feat_target_pos = feat[pos_idx]
+        feature_sim = self.feature_similarity(feat, feat_target_pos)
+        matching_pr = self.matching_probability(feature_sim)
+
+        comask_pos = self.compute_comask(matching_pr, mask, mask[pos_idx])
+        feat_warp_pos = self.soft_warping(matching_pr, feat_target_pos)
+        feat_recon_pos = self.reconstruct(mask, feat_warp_pos, feat)
+
+        # negative
+        feat_target_neg = feat[neg_idx]
+        feature_sim = self.feature_similarity(feat, feat_target_neg)
+        matching_pr = self.matching_probability(feature_sim)
+
+        feat_warp = self.soft_warping(matching_pr, feat_target_neg)
+        feat_recon_neg = self.reconstruct(mask, feat_warp, feat)
+
+        loss = torch.mean(comask_pos * self.criterion(feat, feat_recon_pos, feat_recon_neg))
+
+        return {'feat': feat_recon_pos, 'loss': loss}

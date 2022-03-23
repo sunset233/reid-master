@@ -14,6 +14,7 @@ import torch.utils.data as data
 import torchvision.transforms as transforms
 from torch.autograd import Variable
 
+from baseline import backbone
 from losses import *
 from model import network
 from data_utils import *
@@ -149,14 +150,15 @@ print('Data Loading Time:\t {:.3f}'.format(time.time() - end))
 
 print('==> Building model..')
 
-net = network(args, n_class, no_local='on')
+net = network(args, n_class)
 
 net.to(device)
 cudnn.benchmark = True
 
 # define loss function
-# criterion_id = CrossEntropyLabelSmooth(n_class)
+# criterion_id = SoftmaxCrossEntroyLoss(n_class)
 criterion_id = nn.CrossEntropyLoss()
+# criterion_tri = TripletLoss_WRT()
 criterion_tri = OriTripletLoss(batch_size=args.batch_size * args.num_pos, margin=args.margin)
 
 criterion_id.to(device)
@@ -230,15 +232,15 @@ def train(epoch):
         data_time.update(time.time() - end)
 
         if args.method == 'full':
-            out = net(img_v, img_t)
+            out = net(img_v, img_t, train='true')
         else:
-            out = net(img_v, img_t)
+            out = net(img_v, img_t, train='true')
 
+        loss_id = criterion_id(out['cls_id'], labels)
         loss_tri, batch_acc = criterion_tri(out['feat_p'], labels)
 
-        loss_id = criterion_id(out['cls_id'], labels) + loss_tri
         # loss_recon = out['loss_recon']
-        loss = loss_id
+        loss = loss_id + loss_tri
         # if args.method == 'full':
         #     loss_ic = criterion_id(out['cls_ic_layer3'], labels) + criterion_id(out['cls_ic_layer4'], labels)
         #     loss_dt = out['loss_dt']
@@ -264,7 +266,6 @@ def train(epoch):
         #     loss_ic_meter.update(loss_ic.item(), 2 * img_v.size(0))
         #     loss_dt_meter.update(loss_dt.item(), 2 * img_v.size(0))
 
-        total += labels.size(0)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -272,19 +273,22 @@ def train(epoch):
 
         # 'loss_ic: {loss_ic.val:.4f} ({loss_ic.avg:.4f}) '
         # 'loss_dt: {loss_dt.val:.4f} ({loss_dt.avg:.4f}) '
-        # 'loss_recon: {loss_recon.val:.4f} ({loss_recon.avg:.4f})'
+        #
         if batch_idx % 50 == 0:
             if args.method == 'full':
                 print('Epoch: [{}][{}/{}] '
-                      'lr: {:.3f} '
+                      'lr:{:.3f} '
+                      'Time: {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                       'loss: {train_loss.val:.4f} ({train_loss.avg:.4f}) '
                       'loss_id: {loss_id.val:.4f} ({loss_id.avg:.4f}) '
+                      'loss_recon: {loss_recon.val:.4f} ({loss_recon.avg:.4f})'
                       'acc: {acc:.2f}'.format(
                     epoch, batch_idx, len(trainloader),
                     current_lr,
+                    batch_time=batch_time,
                     train_loss=train_loss_meter,
                     loss_id=loss_id_meter,
-                    # loss_recon=loss_recon_meter,
+                    loss_recon=loss_recon_meter,
                     # loss_ic=loss_ic_meter,
                     # loss_dt=loss_dt_meter,
                     acc=100. * correct / total)
@@ -323,7 +327,7 @@ def test(epoch):
             input = data['img']
             batch_num = input.size(0)
             input = Variable(input.cuda())
-            feat = net(input, input, test_mode[0])['feat_p_norm']
+            feat = net(input, input, test_mode[0], train='false')['feat_p_norm']
             gall_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))
@@ -339,7 +343,7 @@ def test(epoch):
             input = data['img']
             batch_num = input.size(0)
             input = Variable(input.cuda())
-            feat = net(input, input, test_mode[1] )['feat_p_norm']
+            feat = net(input, input, test_mode[1], train='false')['feat_p_norm']
             query_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))
