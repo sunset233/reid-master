@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 parser = argparse.ArgumentParser(description='PyTorch Cross-Modality Testing')
 ### dataloader config
-parser.add_argument('--dataset', default='regdb', help='dataset name: [regdb or sysu]')
+parser.add_argument('--dataset', default='sysu', help='dataset name: [regdb or sysu]')
 parser.add_argument('--workers', default=4, type=int, help='number of data loading workers (default: 4)')
 parser.add_argument('--img_h', default=288, type=int, help='img height')
 parser.add_argument('--img_w', default=144, type=int, help='img width')
@@ -31,7 +31,7 @@ parser.add_argument('--num_pos', default=4, type=int, help='num of pos per ident
 parser.add_argument('--batch_size', default=8, type=int, help='training batch size')
 parser.add_argument('--test-batch', default=64, type=int, help='testing batch size')
 ### directory config
-parser.add_argument('--save_path', default='log/regdb', type=str, help='parent save directory')
+parser.add_argument('--save_path', default='log/', type=str, help='parent save directory')
 parser.add_argument('--exp_name', default='exp', type=str, help='child save directory')
 parser.add_argument('--model_name', default='ep_80', type=str, help='model save path')
 ### model/training config

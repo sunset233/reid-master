@@ -39,7 +39,7 @@ parser.add_argument('--exp_name', default='exp', type=str, help='child save dire
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate, 0.00035 for adam')
 parser.add_argument('--optim', default='sgd', type=str, help='optimizer')
 parser.add_argument('--save_epoch', default=40, type=int, help='save epochs')
-parser.add_argument('--test_every', default=40, type=int, help='test epochs')
+parser.add_argument('--test_every', default=20, type=int, help='test epochs')
 parser.add_argument('--lw_dt', default=0.5, type=float, help='weight for dense triplet loss')
 parser.add_argument('--margin', default=0.3, type=float, help='triplet loss margin')
 parser.add_argument('--method', default='full', type=str, help='method type: [baseline or full]')
@@ -65,7 +65,7 @@ if dataset == 'sysu':
     test_mode = [1, 2]  # thermal to visible
 elif dataset == 'regdb':
     data_path = '/home/lxz/lph/datasets/RegDB/'
-    test_mode = [2, 1]  # visible to thermal
+    test_mode = [1, 2]  # visible to thermal
 
 log_path = osp.join(args.save_path, args.exp_name)
 checkpoint_path = osp.join(log_path, 'checkpoints')
@@ -122,8 +122,8 @@ elif dataset == 'regdb':
     color_pos, thermal_pos = GenIdx(trainset.train_color_label, trainset.train_thermal_label)
 
     # testing set
-    query_img, query_label = process_test_regdb(data_path, trial=args.trial, modal='visible')
-    gall_img, gall_label = process_test_regdb(data_path, trial=args.trial, modal='thermal')
+    query_img, query_label = process_test_regdb(data_path, trial=args.trial, modal='thermal')
+    gall_img, gall_label = process_test_regdb(data_path, trial=args.trial, modal='visible')
 
 gallset = TestData(gall_img, gall_label, transform=transform_test, img_size=(args.img_w, args.img_h))
 queryset = TestData(query_img, query_label, transform=transform_test, img_size=(args.img_w, args.img_h))
@@ -149,20 +149,20 @@ print('  ------------------------------')
 print('Data Loading Time:\t {:.3f}'.format(time.time() - end))
 
 print('==> Building model..')
-
+from tricenterloss import *
 net = network(args, n_class)
-
 net.to(device)
 cudnn.benchmark = True
-
 # define loss function
-# criterion_id = SoftmaxCrossEntroyLoss(n_class)
 criterion_id = nn.CrossEntropyLoss()
-# criterion_tri = TripletLoss_WRT()
 criterion_tri = OriTripletLoss(batch_size=args.batch_size * args.num_pos, margin=args.margin)
-
+# criterion_tri = TripletLoss_WRT()
+# criterion_tri = HcTripletLoss(batch_size=args.batch_size)
+center_loss = CenterLoss(n_class, 2048)
 criterion_id.to(device)
 criterion_tri.to(device)
+center_loss.to(device)
+
 
 ignored_params = list(map(id, net.bottleneck.parameters())) \
                  + list(map(id, net.classifier.parameters()))
@@ -198,10 +198,8 @@ def train(epoch):
     current_lr = adjust_learning_rate(optimizer, epoch)
     train_loss_meter = AverageMeter()
     loss_id_meter = AverageMeter()
-    loss_recon_meter = AverageMeter()
-    # if args.method == 'full':
-    #     loss_ic_meter = AverageMeter()
-    #     loss_dt_meter = AverageMeter()
+    loss_tri_meter = AverageMeter()
+    loss_cen_meter = AverageMeter()
 
     data_time = AverageMeter()
     batch_time = AverageMeter()
@@ -230,50 +228,30 @@ def train(epoch):
 
         labels = Variable(labels.cuda())
         data_time.update(time.time() - end)
+        out = net(img_v, img_t, train='true')
+        feat, cls_id = out['feat_p'], out['cls_id']
+        loss_tri, batch_acc = criterion_tri(feat, labels)
 
-        if args.method == 'full':
-            out = net(img_v, img_t, train='true')
-        else:
-            out = net(img_v, img_t, train='true')
-
-        loss_id = criterion_id(out['cls_id'], labels)
-        loss_tri, batch_acc = criterion_tri(out['feat_p'], labels)
-
-        # loss_recon = out['loss_recon']
-        loss = loss_id + loss_tri
-        # if args.method == 'full':
-        #     loss_ic = criterion_id(out['cls_ic_layer3'], labels) + criterion_id(out['cls_ic_layer4'], labels)
-        #     loss_dt = out['loss_dt']
-        #
-        #     loss = loss_id + loss_ic + args.lw_dt * loss_dt
-        # else:
-        #     loss = loss_id
-
+        loss_id = criterion_id(cls_id, labels)
         correct += (batch_acc / 2)
-        _, predicted = out['cls_id'].max(1)
+        _, predicted = cls_id.max(1)
         correct += (predicted.eq(labels).sum().item() / 2)
-        total += labels.size(0)
 
+        loss = loss_id + loss_tri
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         train_loss_meter.update(loss.item(), 2 * img_v.size(0))
         loss_id_meter.update(loss_id.item(), 2 * img_v.size(0))
-        # loss_recon_meter.update(loss_recon.item(), 2 * img_v.size(0))
-
-        # if args.method == 'full':
-        #     loss_ic_meter.update(loss_ic.item(), 2 * img_v.size(0))
-        #     loss_dt_meter.update(loss_dt.item(), 2 * img_v.size(0))
+        loss_tri_meter.update(loss_tri.item(), 2 * img_v.size(0))
+        total += labels.size(0)
 
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
-        # 'loss_ic: {loss_ic.val:.4f} ({loss_ic.avg:.4f}) '
-        # 'loss_dt: {loss_dt.val:.4f} ({loss_dt.avg:.4f}) '
-        #
         if batch_idx % 50 == 0:
             if args.method == 'full':
                 print('Epoch: [{}][{}/{}] '
@@ -281,16 +259,16 @@ def train(epoch):
                       'Time: {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                       'loss: {train_loss.val:.4f} ({train_loss.avg:.4f}) '
                       'loss_id: {loss_id.val:.4f} ({loss_id.avg:.4f}) '
-                      'loss_recon: {loss_recon.val:.4f} ({loss_recon.avg:.4f})'
+                      'loss_tri: {loss_tri.val:.4f} ({loss_tri.avg:.4f})'
+                      'loss_cen: {loss_center.val:.4f} ({loss_center.avg:.4f})'
                       'acc: {acc:.2f}'.format(
                     epoch, batch_idx, len(trainloader),
                     current_lr,
                     batch_time=batch_time,
                     train_loss=train_loss_meter,
                     loss_id=loss_id_meter,
-                    loss_recon=loss_recon_meter,
-                    # loss_ic=loss_ic_meter,
-                    # loss_dt=loss_dt_meter,
+                    loss_tri=loss_tri_meter,
+                    loss_center=loss_cen_meter,
                     acc=100. * correct / total)
                 )
             else:
@@ -309,6 +287,8 @@ def train(epoch):
     if args.enable_tb:
         writer.add_scalar('total_loss', train_loss_meter.avg, epoch)
         writer.add_scalar('id_loss', loss_id_meter.avg, epoch)
+        writer.add_scalar('loss_tri', loss_tri_meter.avg, epoch)
+        writer.add_scalar('loss_center', loss_cen_meter.avg, epoch)
         writer.add_scalar('lr', current_lr, epoch)
         # if args.method == 'full':
         #     writer.add_scalar('ic_loss', loss_ic_meter.avg, epoch)
@@ -327,7 +307,7 @@ def test(epoch):
             input = data['img']
             batch_num = input.size(0)
             input = Variable(input.cuda())
-            feat = net(input, input, test_mode[0], train='false')['feat_p_norm']
+            feat = net(input, input, mode = test_mode[0], train='false')['feat_p_norm']
             gall_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))
@@ -343,7 +323,7 @@ def test(epoch):
             input = data['img']
             batch_num = input.size(0)
             input = Variable(input.cuda())
-            feat = net(input, input, test_mode[1], train='false')['feat_p_norm']
+            feat = net(input, input,mode = test_mode[1], train='false')['feat_p_norm']
             query_feat[ptr:ptr + batch_num, :] = feat.detach().cpu().numpy()
             ptr = ptr + batch_num
     print('Extracting Time:\t {:.3f}'.format(time.time() - start))

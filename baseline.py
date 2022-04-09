@@ -144,33 +144,28 @@ class SpatialAttention(nn.Module):
         x = self.conv(x)
         return self.sigmoid(x)
 class attention(nn.Module):
-    def __init__(self, num_class):
+    def __init__(self, num_class, pool_dim):
         super(attention, self).__init__()
-        pool_dim = 2048
         self.CA = ChannelAttention(pool_dim)
         self.SA = SpatialAttention()
         self.IN = nn.InstanceNorm2d(pool_dim)
         self.BN = nn.BatchNorm2d(pool_dim)
+        self.relu = nn.ReLU(inplace=True)
     def forward(self, xv, xt):
         xv_in = self.IN(xv)
         xt_in = self.IN(xt)
         xv_bn = self.BN(xv)
-        xt_bn = self.BN((xt))
+        xt_bn = self.BN(xt)
         y1_v = self.SA(self.CA(xv - xv_in))
         y1_t = self.SA(self.CA(xt - xt_in))
         y2_v = self.SA(self.CA(xv - xv_bn))
         y2_t = self.SA(self.CA(xt - xt_bn))
-        yv = y1_v + xv + y2_v
-        yt = y1_t + xt + y2_t
+        yv = y1_v + xt + y2_t
+        yt = y1_t + xv + y2_v
+        # yv = self.relu(yv)
+        # yt = self.relu(yt)
         return yv, yt
 
-        # x_in = self.IN(x)
-        # x2 = self.cbam(x - x_in)
-        # y1 = x_in + x2
-        # x_bn = self.BN(x)
-        # y2 = self.cbam(x_bn)
-        # y = y1 + y2
-        # return y
 
 
 class backbone(nn.Module):
@@ -181,6 +176,14 @@ class backbone(nn.Module):
         pool_dim = 2048
         self.bottleneck = nn.BatchNorm1d(pool_dim)
         self.bottleneck.requires_grad_(False)
+
+        self.classifier_v = nn.Linear(pool_dim, num_class, bias = False)
+        self.classifier_t = nn.Linear(pool_dim, num_class, bias = False)
+        self.KLDivLoss = nn.KLDivLoss(reduction='batchmean')
+        self.weight_sid = args.weight_sid
+        self.weight_KL = args.weight_KL
+        self.update_rate = args.uppdate_rate
+
         self.classifier = nn.Linear(pool_dim, num_class, bias=False)
         self.bottleneck.apply(weights_init_kaiming)
         self.classifier.apply(weights_init_classifier)
